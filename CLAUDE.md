@@ -1,59 +1,59 @@
 # mob_touch — Agent Instructions
 
-A Mob capability plugin: stream raw screen-touch coordinates to a screen, via
-the platform input layer. The defining constraint is **observe without
-consuming** — the app's normal UI must keep working while touches stream.
+**Read [`AGENTS.md`](AGENTS.md) first**, then [`~/code/mob/AGENTS.md`](../mob/AGENTS.md) for the system view. Together they cover the plugin anatomy, the observe-without-consume invariants, the shared `{:touch, ...}` message contract, and the cross-repo work with mob / mob_dev. This file goes deeper on Claude Code-specific workflow detail.
 
-## Layout
+> **Keep AGENTS.md up to date** when you change the message shape, add an option, or hit a gotcha. Out-of-date guidance there causes wrong decisions downstream — fix it in the same commit, not in a follow-up.
 
-- `lib/mob_touch.ex` — the public `start/2` / `stop/1` API.
-- `lib/mob_touch/demo_screen.ex` — a sample `Mob.Screen` (manifest `:screens`).
-- `src/mob_touch_nif.erl` — the Erlang NIF stub (tolerant `on_load`).
-- `priv/mob_plugin.exs` — the manifest (the bridge implements `MobActivityAware`).
-- `priv/native/jni/mob_touch_nif.zig` — Android NIF glue + the `nativeDeliverTouch`
-  thunk.
-- `priv/native/android/MobTouchBridge.kt` — the `Window.Callback` observer.
-- `priv/native/ios/mob_touch_nif.m` — the passive `UIGestureRecognizer`.
+## What this repo is
 
-## The two load-bearing invariants
-
-1. **Observe, never consume.** Android forwards `dispatchTouchEvent` to the
-   original callback unchanged and returns its result; iOS sets
-   `cancelsTouchesInView = NO` and never advances the recognizer past
-   `.possible`. A mistake here breaks *all* app input — always device-test that a
-   button still fires WHILE streaming.
-2. **The message contract is shared.** `{:touch, %{phase, x, y, pointer,
-   timestamp}}`, phase as a numeric code on the wire (0 down / 1 move / 2 up /
-   3 cancel), coordinates in dp. The zig thunk, the Kotlin `nativeDeliverTouch`,
-   the ObjC `send_touch`, and the `MobTouch` moduledoc are one contract.
-
-The bridge implements `MobActivityAware` (it needs the window), so it depends on
-the host's `MainActivity` calling `MobPluginBootstrap.registerAll(this)`.
+A Mob capability plugin: stream raw screen-touch coordinates to a screen via the platform input layer. `MobTouch.start/2` installs a passive whole-window observer (iOS `UIGestureRecognizer` / Android `Window.Callback` `Proxy`); `MobTouch.stop/1` removes it. The defining property is **observe without consuming** — the app's normal UI must keep working while touches stream.
 
 ## Pre-commit checklist
 
+Before committing, run all in this order:
+
 ```bash
 mix format
-mix credo --strict
+mix credo --strict                  # includes ExSlop + jump_credo_checks
 mix compile --warnings-as-errors
 mix test
 zig fmt priv/native/jni/*.zig
 xcrun clang-format -i priv/native/ios/*.m
-mix mob.validate_plugin   # from a host app
+mix mob.validate_plugin             # from a host app
 ```
 
-Native code isn't exercised by `mix test`; verify on a device (`mix mob.deploy
---native`, drive a screen that calls `MobTouch`, confirm observe-without-consume).
+Pre-push hook (`.githooks/pre-push`) adds format + credo strict + compile + fast tests on every push. Activate once per clone:
 
-## Release
+```bash
+git config core.hooksPath .githooks
+```
 
-`mix.exs` version is the source of truth. Bump it, update `CHANGELOG.md`, sign
-with the shared mob key (`cp ~/.mob/keys/<sibling>.priv ~/.mob/keys/mob_touch.priv
-&& mix mob.plugin.sign`), then publish (GitHub release workflow on push, or
-`HEX_API_KEY=… mix hex.publish` with `~/.hex/hex.config` moved aside). A published
-version is permanent — get a native build green on hardware first.
+Native code isn't exercised by `mix test`. Verify on a device (`mix mob.deploy --native` a host that calls `MobTouch.start(socket)` in a screen `mount/3`, confirm `:down`/`:move`/`:up` arrive AND a button on the same screen still fires).
 
-## Decision log
+### Tests are part of the change
 
-Non-obvious calls go in `decisions/YYYY-MM-DD-slug.md`. Append; never edit a
-landed one.
+New behaviour ships with a test unless the change is small enough that a test would only restate it. The bar is: **would this test fail if the fix were reverted?** For mob_touch specifically, any change to option normalisation or the `{:touch, %{...}}` shape needs a test that pins the contract.
+
+### Decision log — check both directions
+
+Non-obvious calls go in `decisions/YYYY-MM-DD-slug.md`. Append; never edit a landed one.
+
+Before committing:
+* **Does this need a new record?** Any tradeoff or workaround — grep `decisions/` first to make sure you aren't restating one.
+* **Does this INVALIDATE an existing record?** A record asserting a property the code no longer has is worse than no record. Correct in place with a note about what was wrong, don't quietly delete. `2026-06-17-observe-without-consuming.md` is the load-bearing one.
+
+### Adversarial review — before every non-trivial commit
+
+Spawn a subagent, point it at the diff, tell it to find defects. Especially:
+
+* **Observe-without-consume regressions.** The Kotlin `Proxy` returning the wrong value, or the ObjC recognizer advancing state — silent breakage of every button in the app.
+* **Message-contract drift.** The zig / kt / objc / moduledoc quartet moves as one; a subagent reviewing only one side won't catch a mismatch.
+
+Skip only for: formatting, a typo, a version bump, a changelog edit.
+
+## Release flow
+
+Canonical process in [`~/code/mob/RELEASE.md`](../mob/RELEASE.md). mob_touch specifics:
+
+* `@version` in `mix.exs` is the trigger. Push it to master, GH Actions handles tag / GitHub release / Hex publish, signed with the shared mob first-party key.
+* **Never ship without a device build.** Simulators don't exercise the platform's real input layer — `mix mob.deploy --native` to a real phone, drive a screen that streams touches, verify observe-without-consume.
