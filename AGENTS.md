@@ -62,20 +62,52 @@ Native code isn't exercised by `mix test`. Device test = build a host with `MobT
 3. **Screens that call `start/1` must eventually call `stop/1`.** The observer keeps hitting the mailbox for the life of the process otherwise; document it or wire it into `terminate/2` in any demo you ship.
 4. **`throttle_ms: 0` is legal but expensive.** Every raw move hits the BEAM. Default 16ms is a real choice, not a placeholder — don't lower it in demos.
 
-## Pre-commit + release
+## Pre-commit checklist
 
-Standard mob plugin gate:
+Before committing, run all in this order:
 
 ```bash
 mix format
-mix credo --strict
+mix credo --strict                  # includes ExSlop + jump_credo_checks
 mix compile --warnings-as-errors
 mix test
 zig fmt priv/native/jni/*.zig
 xcrun clang-format -i priv/native/ios/*.m
-mix mob.validate_plugin   # from a host app
+mix mob.validate_plugin             # from a host app
 ```
 
-Activate the pre-push hook once per clone: `git config core.hooksPath .githooks`.
+Pre-push hook (`.githooks/pre-push`) adds format + credo strict + compile + fast tests on every push. Activate once per clone:
 
-Release = `mix.exs` `@version` bump on master. GH Actions handles tag + GitHub release + Hex publish, signed with the shared mob first-party key. Do NOT bump without explicit permission and a green device build.
+```bash
+git config core.hooksPath .githooks
+```
+
+Native code isn't exercised by `mix test`: device-test as described under Testing above before committing native changes.
+
+### Tests are part of the change
+
+New behaviour ships with a test unless the change is small enough that a test would only restate it. The bar is: **would this test fail if the fix were reverted?** For mob_touch specifically, any change to option normalisation or the `{:touch, %{...}}` shape needs a test that pins the contract.
+
+### Decision log — check both directions
+
+Non-obvious calls go in `decisions/YYYY-MM-DD-slug.md`. Append; never edit a landed one.
+
+Before committing:
+* **Does this need a new record?** Any tradeoff or workaround — grep `decisions/` first to make sure you aren't restating one.
+* **Does this INVALIDATE an existing record?** A record asserting a property the code no longer has is worse than no record. Correct in place with a note about what was wrong, don't quietly delete. `2026-06-17-observe-without-consuming.md` is the load-bearing one.
+
+### Adversarial review — before every non-trivial commit
+
+Spawn a subagent, point it at the diff, tell it to find defects. Especially:
+
+* **Observe-without-consume regressions.** The Kotlin `Proxy` returning the wrong value, or the ObjC recognizer advancing state — silent breakage of every button in the app.
+* **Message-contract drift.** The zig / kt / objc / moduledoc quartet moves as one; a subagent reviewing only one side won't catch a mismatch.
+
+Skip only for: formatting, a typo, a version bump, a changelog edit.
+
+## Release flow
+
+Canonical process in [`~/code/mob/RELEASE.md`](../mob/RELEASE.md). mob_touch specifics:
+
+* `@version` in `mix.exs` is the trigger. Push it to master, GH Actions handles tag / GitHub release / Hex publish, signed with the shared mob first-party key. Do NOT bump without explicit permission and a green device build.
+* **Never ship without a device build.** Simulators don't exercise the platform's real input layer — `mix mob.deploy --native` to a real phone, drive a screen that streams touches, verify observe-without-consume.
