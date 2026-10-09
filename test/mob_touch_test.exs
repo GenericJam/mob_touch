@@ -90,22 +90,62 @@ defmodule MobTouchTest do
       assert Contract.result?(result)
     end
 
-    test "the injected down and up observed at the injected dp coordinates pass" do
+    test "the injected down, then the bridge's cancel, at the injected dp coordinates pass" do
       send(self(), {:touch, %{phase: :down, x: 8.0, y: 8.4, pointer: 0, timestamp: 1}})
       send(self(), {:touch, %{phase: :move, x: 30.0, y: 30.0, pointer: 0, timestamp: 2}})
-      send(self(), {:touch, %{phase: :up, x: 8.0, y: 8.0, pointer: 0, timestamp: 3}})
+      send(self(), {:touch, %{phase: :cancel, x: 8.0, y: 8.0, pointer: 0, timestamp: 3}})
+      assert SelfTest.await_touches(0) == :pass
+
+      send(self(), {:touch, %{phase: :down, x: 8.0, y: 8.0, pointer: 0, timestamp: 1}})
+      send(self(), {:touch, %{phase: :up, x: 8.0, y: 8.0, pointer: 0, timestamp: 2}})
       assert SelfTest.await_touches(0) == :pass
     end
 
-    test "a down without its up, or no touch at all, fails naming the missing phases" do
+    test "an end before any down does not count as the press" do
+      send(self(), {:touch, %{phase: :cancel, x: 8.0, y: 8.0, pointer: 0, timestamp: 1}})
+      assert {:fail, reason} = SelfTest.await_touches(0)
+      assert reason =~ "delivered no :down within 0 ms"
+    end
+
+    test "a down without its end, or no touch at all, fails naming what is missing" do
       send(self(), {:touch, %{phase: :down, x: 8.0, y: 8.0, pointer: 0, timestamp: 1}})
       result = SelfTest.await_touches(0)
       assert {:fail, reason} = result
-      assert reason =~ "delivered no :up within 0 ms"
+      assert reason =~ "delivered no :cancel / :up after the :down within 0 ms"
       assert Contract.result?(result)
 
       assert {:fail, reason} = SelfTest.await_touches(0)
-      assert reason =~ "delivered no :down / :up"
+      assert reason =~ "delivered no :down"
+    end
+
+    test "Android: an injection that overtook the observer install is retried once" do
+      {:ok, presses} = Agent.start_link(fn -> 0 end)
+      me = self()
+
+      # The bridge's first down lands before the observer exists (nothing is
+      # delivered); the second is observed with the cancel that ends it.
+      press = fn ->
+        if Agent.get_and_update(presses, &{&1, &1 + 1}) == 1 do
+          send(me, {:touch, %{phase: :down, x: 8.0, y: 8.0, pointer: 0, timestamp: 1}})
+          send(me, {:touch, %{phase: :cancel, x: 8.0, y: 8.0, pointer: 0, timestamp: 2}})
+        end
+
+        {:error, :dispatch_failed}
+      end
+
+      assert SelfTest.prove_android(press, 0) == :pass
+      assert Agent.get(presses, & &1) == 2
+    end
+
+    test "Android: two unobserved injections fail; a host that cannot inject skips" do
+      result = SelfTest.prove_android(fn -> :ok end, 0)
+      assert {:fail, "injected a touch" <> _} = result
+      assert Contract.result?(result)
+
+      result = SelfTest.prove_android(fn -> {:error, :not_loaded} end, 0)
+      assert {:skip, reason} = result
+      assert reason =~ "press_down_xy/3 returned {:error, :not_loaded}"
+      assert Contract.result?(result)
     end
 
     test "coordinates in pixels instead of dp fail" do

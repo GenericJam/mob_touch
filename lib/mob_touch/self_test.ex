@@ -7,21 +7,24 @@ defmodule MobTouch.SelfTest do
   checks what comes back, and `touch_stop/0` removes the observer again.
 
     * **Android**: after `touch_start/1` answers `:ok`, the test puts a
-      synthetic finger down and lifts it at (8, 8) dp with mob's
-      in-process injection (`:mob_nif.press_down_xy/3` /
-      `press_up_xy/2`, which dispatch real `MotionEvent`s at the window's
-      decor view, the same path a finger takes through `Window.Callback`).
-      It passes when both `{:touch, %{phase: :down}}` and `{:touch, %{phase:
-      :up}}` arrive at those coordinates: the zig NIF is linked, the Kotlin
+      synthetic finger down at (8, 8) dp with mob's in-process
+      `:mob_nif.press_down_xy/3`, which dispatches real `MotionEvent`s at the
+      window's decor view (the path a finger takes through
+      `Window.Callback`). The finger is never lifted: mob's bridge cancels it
+      after 100 ms, or at once when no view consumed the down (`{:error,
+      :dispatch_failed}`, the corner of a blank screen), so nothing on the
+      host's screen is ever clicked. The test passes when the observer
+      delivers `{:touch, %{phase: :down}}` and then `:cancel` (or `:up`) at
+      those dp coordinates: the zig NIF is linked, the Kotlin
       `MobTouchBridge` registered and has the Activity, its observer sits in
       the window's callback chain and the `nativeDeliverTouch` thunk
-      reaches the BEAM in dp. A touch that is not consumed by any view (the
-      corner of a blank screen) is still observed, so `{:error,
-      :dispatch_failed}` from the injection is not an error here.
-      `{:error, :bridge_not_registered}` from the NIF, or no touch within
-      2 s of an accepted injection, fails. When the host cannot inject
-      (`:not_loaded`, `:no_window`, `:timeout`, a finger already held) the
-      test cannot observe anything and skips, saying why.
+      reaches the BEAM in dp. The observer is installed asynchronously on
+      the UI thread, so an injection that overtook the install is retried
+      once before the test fails. `{:error, :bridge_not_registered}` from the
+      NIF, or no touch for either injection, fails. When the host cannot
+      inject (`:not_loaded` from a generated `MobBridge.kt` older than the
+      held-press methods, `:no_window`, `:timeout`, a finger already held)
+      the test cannot observe anything and skips, saying why.
     * **iOS**: mob has no in-process touch injection that reaches UIKit
       (`press_down_xy/3` answers `{:error, :not_supported}`), so the proof
       is the native round trip: `touch_start/1` and `touch_stop/0` must both
@@ -37,7 +40,8 @@ defmodule MobTouch.SelfTest do
 
   @x 8.0
   @y 8.0
-  @answer_timeout 2_000
+  @max_hold 100
+  @answer_timeout 1_500
 
   @impl true
   def run(%{platform: platform}) do
@@ -56,16 +60,27 @@ defmodule MobTouch.SelfTest do
   end
 
   defp prove(:ios), do: :pass
+  defp prove(:android), do: prove_android(&press/0, @answer_timeout)
 
-  defp prove(:android) do
-    down = inject(:press_down_xy, [@x, @y, 5_000])
+  defp press do
+    :mob_nif.press_down_xy(@x, @y, @max_hold)
+  rescue
+    e -> {:error, {:raised, Exception.message(e)}}
+  end
 
-    if accepted?(down) do
-      up = inject(:press_up_xy, [@x, @y])
-      if accepted?(up), do: await_touches(@answer_timeout), else: injection_skip(up)
-    else
-      injection_skip(down)
+  @doc false
+  # The Android proof with the injection passed in, so the unit tests can
+  # play the bridge: two attempts, each must be accepted and observed.
+  @spec prove_android((-> term()), non_neg_integer()) :: Mob.Plugin.SelfTest.result()
+  def prove_android(press, timeout) do
+    with {:fail, _} <- attempt(press, timeout) do
+      attempt(press, timeout)
     end
+  end
+
+  defp attempt(press, timeout) do
+    result = press.()
+    if accepted?(result), do: await_touches(timeout), else: injection_skip(result)
   end
 
   # touch_stop/0 must answer too: it is the half that restores the window.
@@ -73,15 +88,10 @@ defmodule MobTouch.SelfTest do
   defp combine(:pass, other), do: classify_nif("touch_stop/0", other)
   defp combine(result, _stop), do: result
 
-  defp inject(fun, args) do
-    apply(:mob_nif, fun, args)
-  rescue
-    e -> {:error, {:raised, Exception.message(e)}}
-  end
-
   @doc false
-  # Whether a mob_nif injection result means the event reached the window.
-  # :dispatch_failed only says no view consumed it; the observer sees it first.
+  # Whether a press_down_xy result means the down reached the window.
+  # :dispatch_failed only says no view consumed it (the bridge then cancels
+  # the pointer itself); the observer sees both events first.
   @spec accepted?(term()) :: boolean()
   def accepted?(:ok), do: true
   def accepted?({:error, :dispatch_failed}), do: true
@@ -92,7 +102,7 @@ defmodule MobTouch.SelfTest do
   def injection_skip(result) do
     {:skip,
      "touch_start/1 answered :ok, but this host cannot inject a touch to observe " <>
-       "(:mob_nif press injection returned #{inspect(result)})"}
+       "(:mob_nif.press_down_xy/3 returned #{inspect(result)})"}
   end
 
   @doc false
@@ -107,42 +117,48 @@ defmodule MobTouch.SelfTest do
   def classify_nif(call, other), do: {:fail, "#{call} returned #{inspect(other)}, expected :ok"}
 
   @doc false
-  # The classification of what the observer delivers for the injected down + up.
+  # The classification of what the observer delivers for one injected press:
+  # a :down, then the pointer's end (:cancel, or :up), at the injected point.
   @spec await_touches(non_neg_integer()) :: Mob.Plugin.SelfTest.result()
   def await_touches(timeout) do
     deadline = System.monotonic_time(:millisecond) + timeout
-    collect(deadline, timeout, MapSet.new([:down, :up]))
+    collect(deadline, timeout, :down)
   end
 
-  defp collect(deadline, timeout, missing) do
-    if MapSet.size(missing) == 0 do
-      :pass
-    else
-      wait = max(deadline - System.monotonic_time(:millisecond), 0)
+  defp collect(deadline, timeout, waiting_for) do
+    wait = max(deadline - System.monotonic_time(:millisecond), 0)
 
-      receive do
-        {:touch, %{phase: phase, x: x, y: y}} when phase in [:down, :up] ->
-          if near?(x, @x) and near?(y, @y) do
-            collect(deadline, timeout, MapSet.delete(missing, phase))
-          else
+    receive do
+      {:touch, %{phase: phase, x: x, y: y}} when phase in [:down, :up, :cancel] ->
+        cond do
+          not (near?(x, @x) and near?(y, @y)) ->
             {:fail,
              "observed #{phase} at (#{inspect(x)}, #{inspect(y)}), injected at " <>
                "(#{@x}, #{@y}) dp: the bridge is not converting pixels to dp"}
-          end
 
-        {:touch, %{phase: _}} ->
-          collect(deadline, timeout, missing)
+          waiting_for == :down and phase == :down ->
+            collect(deadline, timeout, :end)
 
-        {:touch, other} ->
-          {:fail, "observer delivered #{inspect(other)}, expected %{phase:, x:, y:, ...}"}
-      after
-        wait ->
-          {:fail,
-           "injected a touch at (#{@x}, #{@y}) dp but the observer delivered no " <>
-             "#{missing |> Enum.sort() |> Enum.map_join(" / ", &inspect/1)} within " <>
-             "#{timeout} ms: MobTouchBridge has no Activity or its " <>
-             "Window.Callback proxy is not installed"}
-      end
+          waiting_for == :end and phase in [:up, :cancel] ->
+            :pass
+
+          true ->
+            collect(deadline, timeout, waiting_for)
+        end
+
+      {:touch, %{phase: :move}} ->
+        collect(deadline, timeout, waiting_for)
+
+      {:touch, other} ->
+        {:fail, "observer delivered #{inspect(other)}, expected %{phase:, x:, y:, ...}"}
+    after
+      wait ->
+        missing = if waiting_for == :down, do: ":down", else: ":cancel / :up after the :down"
+
+        {:fail,
+         "injected a touch at (#{@x}, #{@y}) dp but the observer delivered no " <>
+           "#{missing} within #{timeout} ms: MobTouchBridge has no Activity or its " <>
+           "Window.Callback proxy is not installed"}
     end
   end
 
