@@ -106,12 +106,22 @@ export fn Java_io_mob_touch_MobTouchBridge_nativeDeliverTouch(
 }
 
 // ── NIFs ──────────────────────────────────────────────────────────────────
+
+/// {error, bridge_not_registered}: nativeRegister never ran (MobPluginBootstrap
+/// did not call register()) or a method-ID lookup failed. Calling through a null
+/// jclass / method ID would abort the VM; this answers instead. MobTouch.start/2
+/// and stop/1 ignore the return value; MobTouch.SelfTest turns it into a failure.
+fn bridgeNotRegistered(env: ?*erts.ErlNifEnv) erts.ERL_NIF_TERM {
+    return erts.makeTuple(env, .{ erts.atom(env, "error"), erts.atom(env, "bridge_not_registered") });
+}
+
 fn nif_touch_start(env: ?*erts.ErlNifEnv, argc: c_int, argv: [*]const erts.ERL_NIF_TERM) callconv(.c) erts.ERL_NIF_TERM {
     _ = argc;
     var throttle: c_int = 16;
     _ = erts.enif_get_int(env, argv[0], &throttle);
     var pid: erts.ErlNifPid = undefined;
     _ = erts.enif_self(env, &pid);
+    if (g_touch_cls == null or g_touch.start == null) return bridgeNotRegistered(env);
     var attached: c_int = 0;
     const jenv = get_jenv(&attached) orelse return erts.atom(env, "error");
     jenv.*.CallStaticVoidMethod.?(jenv, g_touch_cls, g_touch.start, pidToJlong(pid), @as(jni.JLong, @intCast(throttle)));
@@ -122,6 +132,7 @@ fn nif_touch_start(env: ?*erts.ErlNifEnv, argc: c_int, argv: [*]const erts.ERL_N
 fn nif_touch_stop(env: ?*erts.ErlNifEnv, argc: c_int, argv: [*]const erts.ERL_NIF_TERM) callconv(.c) erts.ERL_NIF_TERM {
     _ = argc;
     _ = argv;
+    if (g_touch_cls == null or g_touch.stop == null) return bridgeNotRegistered(env);
     var attached: c_int = 0;
     const jenv = get_jenv(&attached) orelse return erts.atom(env, "error");
     jenv.*.CallStaticVoidMethod.?(jenv, g_touch_cls, g_touch.stop);

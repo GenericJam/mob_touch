@@ -42,6 +42,8 @@ config :mob, :trusted_plugins, %{mob_touch: "ed25519:<fingerprint>"}
 `mix mob.plugin.trust mob_touch` records the fingerprint, then
 `mix mob.deploy --native`.
 
+`mix mob.selftest` runs `MobTouch.SelfTest` on the device: on Android it injects a touch and checks the observer delivers it in dp; on iOS it checks `touch_start`/`touch_stop` answer from the NIF.
+
 ## How it works
 
 - **Android:** wraps the Activity window's `Window.Callback` with a reflective
