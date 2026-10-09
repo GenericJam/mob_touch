@@ -1,7 +1,9 @@
 defmodule MobTouchTest do
   use ExUnit.Case, async: true
 
+  alias Mob.Plugin.SelfTest, as: Contract
   alias MobDev.Plugin.{Manifest, Validator}
+  alias MobTouch.SelfTest
 
   @plugin_dir Path.expand("..", __DIR__)
 
@@ -44,6 +46,81 @@ defmodule MobTouchTest do
       end
 
       assert File.exists?(Path.join(@plugin_dir, m.android.bridge_kt))
+    end
+
+    test "declares the self-test, which passes the validator without a warning", %{manifest: m} do
+      assert m.selftest == MobTouch.SelfTest
+      assert %{errors: [], warnings: warnings} = Validator.validate_plugin(m, @plugin_dir)
+      refute Enum.any?(warnings, &(&1 =~ "selftest"))
+    end
+  end
+
+  describe "MobTouch.SelfTest" do
+    test "on a host with no native library linked it fails, naming the NIF, instead of raising" do
+      for platform <- [:ios, :android] do
+        result = SelfTest.run(%{platform: platform, device: :simulator})
+        assert {:fail, reason} = result
+        assert reason =~ "mob_touch_nif is not linked"
+        assert reason =~ "nif_not_loaded"
+        assert Contract.result?(result)
+      end
+    end
+
+    test "an unregistered Kotlin bridge or an unexpected NIF answer fails" do
+      result = SelfTest.classify_nif("touch_start/1", {:error, :bridge_not_registered})
+      assert {:fail, "touch_start/1: Kotlin MobTouchBridge not registered" <> _} = result
+      assert Contract.result?(result)
+
+      result = SelfTest.classify_nif("touch_stop/0", :error)
+      assert result == {:fail, "touch_stop/0 returned :error, expected :ok"}
+      assert Contract.result?(result)
+    end
+
+    test "a dispatched touch counts as injected even when no view consumed it" do
+      assert SelfTest.accepted?(:ok)
+      assert SelfTest.accepted?({:error, :dispatch_failed})
+      refute SelfTest.accepted?({:error, :not_loaded})
+      refute SelfTest.accepted?({:error, :not_supported})
+    end
+
+    test "a host that cannot inject is a skip that says what the injection returned" do
+      result = SelfTest.injection_skip({:error, :not_loaded})
+      assert {:skip, reason} = result
+      assert reason =~ "{:error, :not_loaded}"
+      assert Contract.result?(result)
+    end
+
+    test "the injected down and up observed at the injected dp coordinates pass" do
+      send(self(), {:touch, %{phase: :down, x: 8.0, y: 8.4, pointer: 0, timestamp: 1}})
+      send(self(), {:touch, %{phase: :move, x: 30.0, y: 30.0, pointer: 0, timestamp: 2}})
+      send(self(), {:touch, %{phase: :up, x: 8.0, y: 8.0, pointer: 0, timestamp: 3}})
+      assert SelfTest.await_touches(0) == :pass
+    end
+
+    test "a down without its up, or no touch at all, fails naming the missing phases" do
+      send(self(), {:touch, %{phase: :down, x: 8.0, y: 8.0, pointer: 0, timestamp: 1}})
+      result = SelfTest.await_touches(0)
+      assert {:fail, reason} = result
+      assert reason =~ "delivered no :up within 0 ms"
+      assert Contract.result?(result)
+
+      assert {:fail, reason} = SelfTest.await_touches(0)
+      assert reason =~ "delivered no :down / :up"
+    end
+
+    test "coordinates in pixels instead of dp fail" do
+      send(self(), {:touch, %{phase: :down, x: 22.0, y: 22.0, pointer: 0, timestamp: 1}})
+      result = SelfTest.await_touches(0)
+      assert {:fail, reason} = result
+      assert reason =~ "not converting pixels to dp"
+      assert Contract.result?(result)
+    end
+
+    test "a message outside the touch contract fails" do
+      send(self(), {:touch, :garbage})
+      result = SelfTest.await_touches(0)
+      assert {:fail, "observer delivered :garbage" <> _} = result
+      assert Contract.result?(result)
     end
   end
 

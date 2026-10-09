@@ -1,8 +1,11 @@
 %{
   name: :mob_touch,
-  mob_version: "~> 0.7",
+  mob_version: "~> 0.9",
   plugin_spec_version: 1,
   description: "Stream raw screen-touch coordinates (x/y) to a Mob screen",
+  # On-device proof for `mix mob.selftest` / mob_ci: touch_start/1 through the
+  # NIF, then (Android) an injected touch observed end to end (Mob.Plugin.SelfTest).
+  selftest: MobTouch.SelfTest,
   # A sample screen the host can navigate to by route. Pure-Elixir +
   # hot-pushable; drop it and this entry in a real app that builds its own UI.
   screens: [
