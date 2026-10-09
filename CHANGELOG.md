@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.2 - 2026-10-09
 
 ### Added
 - **On-device self-test** (MOB-418). `MobTouch.SelfTest` implements
@@ -14,14 +14,20 @@
   is retried once for the asynchronous observer install. iOS has no in-process
   injection that reaches UIKit, so there the proof is `touch_start/1` and
   `touch_stop/0` both answering `:ok` from the Objective-C NIF. Run it with
-  `mix mob.selftest` from a host app (mob_dev 0.7.17). Requires mob 0.9.15;
-  `mob_version` in the manifest is now `~> 0.9`.
-- **Android: the NIF reports an unregistered bridge.** `touch_start/1` and
-  `touch_stop/0` answer `{:error, :bridge_not_registered}` when
-  `MobTouchBridge.register()` never ran or a method-ID lookup failed,
-  instead of calling JNI through a null class (which aborts the VM).
-  `MobTouch.start/2` and `stop/1` are unchanged (they ignore the return
-  value); the self-test turns it into a failure.
+  `mix mob.selftest` from a host app (mob_dev 0.7.17+).
+
+### Changed
+- **Requires mob >= 0.9.15** (for `Mob.Plugin.SelfTest`): the `:mob`
+  dependency is now `~> 0.9 and >= 0.9.15` (was `~> 0.7`) and the manifest's
+  `mob_version` is `~> 0.9` (was `~> 0.7`).
+
+### Fixed
+- **Android: an unregistered bridge no longer aborts the VM.**
+  `touch_start/1` and `touch_stop/0` answer `{:error, :bridge_not_registered}`
+  when `MobTouchBridge.register()` never ran or a method-ID lookup failed,
+  instead of calling JNI through a null class. `MobTouch.start/2` and
+  `stop/1` are unchanged (they ignore the return value); the self-test turns
+  it into a failure.
 
 ## 0.1.1 - 2026-09-30
 
