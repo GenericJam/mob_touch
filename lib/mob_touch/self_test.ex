@@ -70,11 +70,17 @@ defmodule MobTouch.SelfTest do
 
   @doc false
   # The Android proof with the injection passed in, so the unit tests can
-  # play the bridge: two attempts, each must be accepted and observed.
+  # play the bridge. A failed attempt is retried once (the observer install
+  # may not have landed yet); a retry that cannot inject (e.g. the first
+  # press is still held) keeps the first failure rather than turning it
+  # into a skip.
   @spec prove_android((-> term()), non_neg_integer()) :: Mob.Plugin.SelfTest.result()
   def prove_android(press, timeout) do
-    with {:fail, _} <- attempt(press, timeout) do
-      attempt(press, timeout)
+    with {:fail, _} = first <- attempt(press, timeout) do
+      case attempt(press, timeout) do
+        {:skip, _} -> first
+        other -> other
+      end
     end
   end
 

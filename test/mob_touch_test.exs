@@ -137,6 +137,29 @@ defmodule MobTouchTest do
       assert Agent.get(presses, & &1) == 2
     end
 
+    test "Android: a real failure stays a failure when the retry cannot inject" do
+      {:ok, presses} = Agent.start_link(fn -> 0 end)
+      me = self()
+
+      # First press: consumed (still held) and observed in pixels, not dp.
+      # Second press: the bridge refuses while the first is held.
+      press = fn ->
+        case Agent.get_and_update(presses, &{&1, &1 + 1}) do
+          0 ->
+            send(me, {:touch, %{phase: :down, x: 22.0, y: 22.0, pointer: 0, timestamp: 1}})
+            :ok
+
+          _ ->
+            {:error, :already_pressed}
+        end
+      end
+
+      result = SelfTest.prove_android(press, 0)
+      assert {:fail, reason} = result
+      assert reason =~ "not converting pixels to dp"
+      assert Contract.result?(result)
+    end
+
     test "Android: two unobserved injections fail; a host that cannot inject skips" do
       result = SelfTest.prove_android(fn -> :ok end, 0)
       assert {:fail, "injected a touch" <> _} = result

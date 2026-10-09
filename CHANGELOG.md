@@ -5,11 +5,13 @@
 ### Added
 - **On-device self-test** (MOB-418). `MobTouch.SelfTest` implements
   `Mob.Plugin.SelfTest` and is declared in the manifest as `selftest:`.
-  `touch_start/1` must answer `:ok`; on Android the test then injects a
-  touch at (8, 8) dp with mob's in-process `press_down_xy` / `press_up_xy`
-  and passes only when the observer delivers the `:down` and `:up` at those
-  dp coordinates (NIF linked, bridge registered with the Activity, the
-  `Window.Callback` proxy installed, delivery wired). iOS has no in-process
+  `touch_start/1` must answer `:ok`; on Android the test then puts a finger
+  down at (8, 8) dp with mob's in-process `press_down_xy` and never lifts it
+  (the bridge cancels it, so nothing on the host is clicked), and passes
+  only when the observer delivers the `:down` and then `:cancel` (or `:up`)
+  at those dp coordinates (NIF linked, bridge registered with the Activity,
+  the `Window.Callback` proxy installed, delivery wired). A failed attempt
+  is retried once for the asynchronous observer install. iOS has no in-process
   injection that reaches UIKit, so there the proof is `touch_start/1` and
   `touch_stop/0` both answering `:ok` from the Objective-C NIF. Run it with
   `mix mob.selftest` from a host app (mob_dev 0.7.17). Requires mob 0.9.15;
